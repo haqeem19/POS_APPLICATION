@@ -1,18 +1,41 @@
-import { useEffect, useMemo, useState } from 'react';
-import { api, money } from './lib/api.js';
+import React, { useEffect, useMemo, useState } from 'react';
+import { AppHeader } from './components/AppHeader.jsx';
+import { AuthGate } from './components/AuthGate.jsx';
+import { LoadingOverlay } from './components/LoadingOverlay.jsx';
+import { ReceiptModal } from './components/ReceiptModal.jsx';
+import { TabNav } from './components/TabNav.jsx';
+import { APP_PASSWORD, AUTH_KEY, emptyProduct, HISTORY_PER_PAGE, LANGUAGE_KEY, PRINTER_SERVICES } from './config.js';
+import { api, formatMoney } from './lib/api.js';
+import { dictionary } from './i18n.js';
+import {
+  DashboardSection,
+  HistorySection,
+  MasterDataSection,
+  ProductSection,
+  StockSection,
+  TransactionSection,
+} from './modules/index.js';
+import {
+  buildSalesPath,
+  formatNumericInput,
+  formatPriceInput,
+  getItemDiscountAmount,
+  itemSummary,
+  parseFormattedNumber,
+  percentAmount,
+  roundCurrency,
+  sanitizePercentInput,
+} from './utils/formatters.js';
+import { buildReceiptPayload, findPrinterCharacteristic } from './utils/receipt.js';
 
-const emptyProduct = {
-  category_id: '',
-  sku: '',
-  name: '',
-  cost_price: '',
-  selling_price: '',
-  stock_quantity: 0,
-  minimum_stock: 0,
-};
+
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [language, setLanguage] = useState(() => localStorage.getItem(LANGUAGE_KEY) || 'id');
+  const [isAuthenticated, setIsAuthenticated] = useState(() => sessionStorage.getItem(AUTH_KEY) === 'true');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [authError, setAuthError] = useState('');
   const [dashboard, setDashboard] = useState(null);
   const [categories, setCategories] = useState([]);
   const [products, setProducts] = useState([]);
@@ -20,34 +43,65 @@ export default function App() {
   const [suppliers, setSuppliers] = useState([]);
   const [movements, setMovements] = useState([]);
   const [sales, setSales] = useState([]);
+  const [salesMeta, setSalesMeta] = useState({ current_page: 1, last_page: 1, per_page: HISTORY_PER_PAGE, total: 0 });
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyPage, setHistoryPage] = useState(1);
   const [categoryForm, setCategoryForm] = useState({ name: '', description: '' });
   const [customerForm, setCustomerForm] = useState({ name: '', phone: '', email: '', address: '' });
   const [supplierForm, setSupplierForm] = useState({ name: '', phone: '', email: '', address: '', contact_person: '' });
-  const [stockForm, setStockForm] = useState({ product_id: '', type: 'in', quantity: 1, notes: '' });
+  const [stockForm, setStockForm] = useState({ product_id: '', type: 'in', quantity: '1', notes: '' });
   const [productForm, setProductForm] = useState(emptyProduct);
   const [saleForm, setSaleForm] = useState({
     customer_id: '',
-    payment_method: 'cash',
+    payment_method: '',
     paid_amount: '',
-    discount_amount: 0,
-    tax_amount: 0,
-    items: [{ product_id: '', quantity: 1, discount_amount: 0 }],
+    discount_percent: '',
+    tax_percent: '',
+    items: [{ product_id: '', quantity: '1', discount_percent: '' }],
   });
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [busyText, setBusyText] = useState('');
+  const [printModalSale, setPrintModalSale] = useState(null);
+  const [printing, setPrinting] = useState(false);
 
-  async function loadData() {
+  const text = dictionary[language];
+  const locale = language === 'id' ? 'id-ID' : 'en-US';
+  const money = (value) => formatMoney(value, locale);
+
+  async function runWithBusy(label, action) {
+    if (loading) {
+      return;
+    }
+
     setLoading(true);
+    setBusyText(label);
+    try {
+      await action();
+    } finally {
+      setLoading(false);
+      setBusyText('');
+    }
+  }
+
+  async function loadData(options = {}) {
+    const { showOverlay = true } = options;
+
+    if (showOverlay) {
+      await runWithBusy(text.loading, () => loadData({ showOverlay: false }));
+      return;
+    }
+
     setMessage('');
     try {
       const [dashboardData, categoryData, productData, customerData, supplierData, movementData, saleData] = await Promise.all([
-        api('/dashboard'),
-        api('/categories?per_page=100'),
-        api('/products?per_page=100'),
-        api('/customers?per_page=100'),
-        api('/suppliers?per_page=100'),
-        api('/stock-movements?per_page=20'),
-        api('/sales?per_page=20'),
+        api('/dashboard', { errorMessage: text.apiError }),
+        api('/categories?per_page=100', { errorMessage: text.apiError }),
+        api('/products?per_page=100', { errorMessage: text.apiError }),
+        api('/customers?per_page=100', { errorMessage: text.apiError }),
+        api('/suppliers?per_page=100', { errorMessage: text.apiError }),
+        api('/stock-movements?per_page=20', { errorMessage: text.apiError }),
+        api(buildSalesPath(historyPage, historySearch), { errorMessage: text.apiError }),
       ]);
       setDashboard(dashboardData);
       setCategories(categoryData.data || []);
@@ -55,132 +109,241 @@ export default function App() {
       setCustomers(customerData.data || []);
       setSuppliers(supplierData.data || []);
       setMovements(movementData.data || []);
-      setSales(saleData.data || []);
+      applySalesResponse(saleData);
     } catch (error) {
       setMessage(error.message);
-    } finally {
-      setLoading(false);
+    }
+  }
+
+  function applySalesResponse(saleData) {
+    setSales(saleData.data || []);
+    setSalesMeta({
+      current_page: saleData.current_page || 1,
+      last_page: saleData.last_page || 1,
+      per_page: Number(saleData.per_page || HISTORY_PER_PAGE),
+      total: Number(saleData.total || 0),
+    });
+    setHistoryPage(saleData.current_page || 1);
+  }
+
+  async function loadSales(page = historyPage, search = historySearch, options = {}) {
+    const { showOverlay = true } = options;
+
+    if (showOverlay) {
+      await runWithBusy(text.loading, () => loadSales(page, search, { showOverlay: false }));
+      return;
+    }
+
+    setMessage('');
+    try {
+      const saleData = await api(buildSalesPath(page, search), { errorMessage: text.apiError });
+      applySalesResponse(saleData);
+    } catch (error) {
+      setMessage(error.message);
     }
   }
 
   useEffect(() => {
-    loadData();
-  }, []);
+    localStorage.setItem(LANGUAGE_KEY, language);
+  }, [language]);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      loadData();
+    }
+  }, [isAuthenticated, language]);
 
   const saleTotal = useMemo(() => {
     const subtotal = saleForm.items.reduce((total, item) => {
       const product = products.find((record) => record.id === Number(item.product_id));
-      return total + (Number(product?.selling_price || 0) * Number(item.quantity || 0) - Number(item.discount_amount || 0));
+      const itemSubtotal = Number(product?.selling_price || 0) * parseFormattedNumber(item.quantity);
+      const itemDiscount = percentAmount(itemSubtotal, item.discount_percent);
+      return total + itemSubtotal - itemDiscount;
     }, 0);
-    return subtotal - Number(saleForm.discount_amount || 0) + Number(saleForm.tax_amount || 0);
+    const transactionDiscount = percentAmount(subtotal, saleForm.discount_percent);
+    const taxableAmount = Math.max(0, subtotal - transactionDiscount);
+    return taxableAmount + percentAmount(taxableAmount, saleForm.tax_percent);
   }, [products, saleForm]);
+
+  function submitPassword(event) {
+    event.preventDefault();
+    if (passwordInput === APP_PASSWORD) {
+      sessionStorage.setItem(AUTH_KEY, 'true');
+      setIsAuthenticated(true);
+      setAuthError('');
+      setPasswordInput('');
+      return;
+    }
+    setAuthError(text.passwordError);
+  }
+
+  function logout() {
+    sessionStorage.removeItem(AUTH_KEY);
+    setIsAuthenticated(false);
+    setDashboard(null);
+    setMessage('');
+  }
 
   async function submitProduct(event) {
     event.preventDefault();
-    setMessage('');
-    try {
-      await api('/products', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...productForm,
-          category_id: productForm.category_id || null,
-          cost_price: Number(productForm.cost_price),
-          selling_price: Number(productForm.selling_price),
-          stock_quantity: Number(productForm.stock_quantity),
-          minimum_stock: Number(productForm.minimum_stock),
-          is_active: true,
-        }),
-      });
-      setProductForm(emptyProduct);
-      setMessage('Produk berhasil disimpan.');
-      await loadData();
-    } catch (error) {
-      setMessage(error.message);
-    }
+    await runWithBusy(text.saving, async () => {
+      setMessage('');
+      try {
+        await api('/products', {
+          method: 'POST',
+          errorMessage: text.apiError,
+          body: JSON.stringify({
+            ...productForm,
+            category_id: productForm.category_id || null,
+            cost_price: parseFormattedNumber(productForm.cost_price),
+            selling_price: parseFormattedNumber(productForm.selling_price),
+            stock_quantity: parseFormattedNumber(productForm.stock_quantity),
+            minimum_stock: parseFormattedNumber(productForm.minimum_stock),
+            is_active: true,
+          }),
+        });
+        setProductForm(emptyProduct);
+        setMessage(text.saveProductSuccess);
+        await loadData({ showOverlay: false });
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
   }
 
   async function submitCategory(event) {
     event.preventDefault();
-    await submitSimple('/categories', categoryForm, () => setCategoryForm({ name: '', description: '' }), 'Kategori berhasil disimpan.');
+    await submitSimple('/categories', categoryForm, () => setCategoryForm({ name: '', description: '' }), text.saveCategorySuccess);
   }
 
   async function submitCustomer(event) {
     event.preventDefault();
-    await submitSimple('/customers', customerForm, () => setCustomerForm({ name: '', phone: '', email: '', address: '' }), 'Pelanggan berhasil disimpan.');
+    await submitSimple('/customers', customerForm, () => setCustomerForm({ name: '', phone: '', email: '', address: '' }), text.saveCustomerSuccess);
   }
 
   async function submitSupplier(event) {
     event.preventDefault();
-    await submitSimple('/suppliers', supplierForm, () => setSupplierForm({ name: '', phone: '', email: '', address: '', contact_person: '' }), 'Supplier berhasil disimpan.');
+    await submitSimple('/suppliers', supplierForm, () => setSupplierForm({ name: '', phone: '', email: '', address: '', contact_person: '' }), text.saveSupplierSuccess);
   }
 
   async function submitSimple(path, payload, reset, successMessage) {
-    setMessage('');
-    try {
-      await api(path, {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-      reset();
-      setMessage(successMessage);
-      await loadData();
-    } catch (error) {
-      setMessage(error.message);
-    }
+    await runWithBusy(text.saving, async () => {
+      setMessage('');
+      try {
+        await api(path, {
+          method: 'POST',
+          errorMessage: text.apiError,
+          body: JSON.stringify(payload),
+        });
+        reset();
+        setMessage(successMessage);
+        await loadData({ showOverlay: false });
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
   }
 
   async function submitStock(event) {
     event.preventDefault();
-    setMessage('');
-    try {
-      await api('/stock-movements', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...stockForm,
-          product_id: Number(stockForm.product_id),
-          quantity: Number(stockForm.quantity),
-        }),
-      });
-      setStockForm({ product_id: '', type: 'in', quantity: 1, notes: '' });
-      setMessage('Mutasi stok berhasil disimpan.');
-      await loadData();
-    } catch (error) {
-      setMessage(error.message);
-    }
+    await runWithBusy(text.saving, async () => {
+      setMessage('');
+      try {
+        await api('/stock-movements', {
+          method: 'POST',
+          errorMessage: text.apiError,
+          body: JSON.stringify({
+            ...stockForm,
+            product_id: Number(stockForm.product_id),
+            quantity: parseFormattedNumber(stockForm.quantity),
+          }),
+        });
+        setStockForm({ product_id: '', type: 'in', quantity: '1', notes: '' });
+        setMessage(text.saveStockSuccess);
+        await loadData({ showOverlay: false });
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
   }
 
   async function submitSale(event) {
     event.preventDefault();
+    await runWithBusy(text.saving, async () => {
+      setMessage('');
+      try {
+        const subtotal = saleForm.items.reduce((total, item) => {
+          const product = products.find((record) => record.id === Number(item.product_id));
+          const itemSubtotal = Number(product?.selling_price || 0) * parseFormattedNumber(item.quantity);
+          return total + itemSubtotal - percentAmount(itemSubtotal, item.discount_percent);
+        }, 0);
+        const transactionDiscountAmount = percentAmount(subtotal, saleForm.discount_percent);
+        const taxableAmount = Math.max(0, subtotal - transactionDiscountAmount);
+        const taxAmount = percentAmount(taxableAmount, saleForm.tax_percent);
+
+        const savedSale = await api('/sales', {
+          method: 'POST',
+          errorMessage: text.apiError,
+          body: JSON.stringify({
+            customer_id: saleForm.customer_id || null,
+            payment_method: saleForm.payment_method,
+            paid_amount: parseFormattedNumber(saleForm.paid_amount),
+            discount_amount: roundCurrency(transactionDiscountAmount),
+            tax_amount: roundCurrency(taxAmount),
+            items: saleForm.items.map((item) => ({
+              product_id: Number(item.product_id),
+              quantity: parseFormattedNumber(item.quantity),
+              discount_amount: roundCurrency(getItemDiscountAmount(item, products)),
+            })),
+          }),
+        });
+        setSaleForm({
+          customer_id: '',
+          payment_method: '',
+          paid_amount: '',
+          discount_percent: '',
+          tax_percent: '',
+          items: [{ product_id: '', quantity: '1', discount_percent: '' }],
+        });
+        setMessage(text.saveSaleSuccess);
+        setPrintModalSale(savedSale);
+        await loadData({ showOverlay: false });
+      } catch (error) {
+        setMessage(error.message);
+      }
+    });
+  }
+
+  async function printReceipt(sale) {
     setMessage('');
-    try {
-      await api('/sales', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...saleForm,
-          customer_id: saleForm.customer_id || null,
-          paid_amount: Number(saleForm.paid_amount),
-          discount_amount: Number(saleForm.discount_amount),
-          tax_amount: Number(saleForm.tax_amount),
-          items: saleForm.items.map((item) => ({
-            product_id: Number(item.product_id),
-            quantity: Number(item.quantity),
-            discount_amount: Number(item.discount_amount || 0),
-          })),
-        }),
-      });
-      setSaleForm({
-        customer_id: '',
-        payment_method: 'cash',
-        paid_amount: '',
-        discount_amount: 0,
-        tax_amount: 0,
-        items: [{ product_id: '', quantity: 1, discount_amount: 0 }],
-      });
-      setMessage('Transaksi berhasil disimpan.');
-      await loadData();
-    } catch (error) {
-      setMessage(error.message);
+
+    if (!navigator.bluetooth) {
+      setMessage(text.printUnsupported);
+      return;
     }
+
+    await runWithBusy(text.printing, async () => {
+      setPrinting(true);
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: PRINTER_SERVICES,
+        });
+        const server = await device.gatt.connect();
+        const characteristic = await findPrinterCharacteristic(server);
+        const payload = buildReceiptPayload(sale, text, locale);
+
+        for (let index = 0; index < payload.length; index += 120) {
+          await characteristic.writeValue(payload.slice(index, index + 120));
+        }
+
+        setMessage(text.printSuccess);
+      } catch (error) {
+        setMessage(`${text.printFailed} ${error.message || ''}`.trim());
+      } finally {
+        setPrinting(false);
+      }
+    });
   }
 
   function updateSaleItem(index, field, value) {
@@ -190,230 +353,134 @@ export default function App() {
     }));
   }
 
+  async function submitHistorySearch(event) {
+    event.preventDefault();
+    await loadSales(1, historySearch);
+  }
+
+  async function resetHistorySearch() {
+    setHistorySearch('');
+    await loadSales(1, '');
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <AuthGate
+        authError={authError}
+        language={language}
+        passwordInput={passwordInput}
+        setLanguage={setLanguage}
+        setPasswordInput={setPasswordInput}
+        submitPassword={submitPassword}
+        text={text}
+      />
+    );
+  }
+
   return (
     <main className="app">
-      <header className="header">
-        <div>
-          <h1>POS Application</h1>
-          <p>Laravel API, Supabase PostgreSQL, React frontend</p>
-        </div>
-        <button type="button" onClick={loadData}>Refresh</button>
-      </header>
+      <AppHeader language={language} loadData={loadData} logout={logout} setLanguage={setLanguage} text={text} />
 
-      <nav className="tabs">
-        {['dashboard', 'produk', 'master', 'stok', 'transaksi', 'riwayat'].map((tab) => (
-          <button
-            type="button"
-            key={tab}
-            className={activeTab === tab ? 'active' : ''}
-            onClick={() => setActiveTab(tab)}
-          >
-            {tab}
-          </button>
-        ))}
-      </nav>
+      <TabNav activeTab={activeTab} setActiveTab={setActiveTab} text={text} />
 
       {message && <p className="message">{message}</p>}
-      {loading && <p>Memuat data...</p>}
 
       {activeTab === 'dashboard' && (
-        <section>
-          <h2>Dashboard</h2>
-          <div className="summary">
-            <div><strong>{money(dashboard?.today_revenue)}</strong><span>Omzet Hari Ini</span></div>
-            <div><strong>{dashboard?.today_sales_count || 0}</strong><span>Transaksi Hari Ini</span></div>
-            <div><strong>{dashboard?.product_count || 0}</strong><span>Total Produk</span></div>
-            <div><strong>{dashboard?.low_stock_count || 0}</strong><span>Stok Rendah</span></div>
-          </div>
-
-          <h3>Produk Stok Rendah</h3>
-          <DataTable
-            columns={['SKU', 'Nama', 'Stok', 'Minimum']}
-            rows={(dashboard?.low_stock_products || []).map((product) => [
-              product.sku,
-              product.name,
-              product.stock_quantity,
-              product.minimum_stock,
-            ])}
-          />
-        </section>
+        <DashboardSection dashboard={dashboard} money={money} text={text} />
       )}
 
       {activeTab === 'produk' && (
-        <section className="split">
-          <form onSubmit={submitProduct}>
-            <h2>Tambah Produk</h2>
-            <label>SKU<input required value={productForm.sku} onChange={(e) => setProductForm({ ...productForm, sku: e.target.value })} /></label>
-            <label>Nama<input required value={productForm.name} onChange={(e) => setProductForm({ ...productForm, name: e.target.value })} /></label>
-            <label>Kategori<select value={productForm.category_id} onChange={(e) => setProductForm({ ...productForm, category_id: e.target.value })}>
-              <option value="">Tanpa kategori</option>
-              {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-            </select></label>
-            <label>Harga Modal<input required type="number" value={productForm.cost_price} onChange={(e) => setProductForm({ ...productForm, cost_price: e.target.value })} /></label>
-            <label>Harga Jual<input required type="number" value={productForm.selling_price} onChange={(e) => setProductForm({ ...productForm, selling_price: e.target.value })} /></label>
-            <label>Stok<input required type="number" value={productForm.stock_quantity} onChange={(e) => setProductForm({ ...productForm, stock_quantity: e.target.value })} /></label>
-            <label>Minimum Stok<input required type="number" value={productForm.minimum_stock} onChange={(e) => setProductForm({ ...productForm, minimum_stock: e.target.value })} /></label>
-            <button type="submit">Simpan Produk</button>
-          </form>
-
-          <div>
-            <h2>Daftar Produk</h2>
-            <DataTable
-              columns={['SKU', 'Nama', 'Kategori', 'Harga', 'Stok']}
-              rows={products.map((product) => [
-                product.sku,
-                product.name,
-                product.category?.name || '-',
-                money(product.selling_price),
-                product.stock_quantity,
-              ])}
-            />
-          </div>
-        </section>
+        <ProductSection
+          categories={categories}
+          formatNumericInput={formatNumericInput}
+          formatPriceInput={formatPriceInput}
+          money={money}
+          parseFormattedNumber={parseFormattedNumber}
+          productForm={productForm}
+          products={products}
+          setProductForm={setProductForm}
+          submitProduct={submitProduct}
+          text={text}
+        />
       )}
 
       {activeTab === 'master' && (
-        <section className="master-grid">
-          <div>
-            <form onSubmit={submitCategory}>
-              <h2>Kategori</h2>
-              <label>Nama<input required value={categoryForm.name} onChange={(e) => setCategoryForm({ ...categoryForm, name: e.target.value })} /></label>
-              <label>Deskripsi<input value={categoryForm.description} onChange={(e) => setCategoryForm({ ...categoryForm, description: e.target.value })} /></label>
-              <button type="submit">Simpan Kategori</button>
-            </form>
-            <DataTable columns={['Nama', 'Deskripsi']} rows={categories.map((category) => [category.name, category.description || '-'])} />
-          </div>
-
-          <div>
-            <form onSubmit={submitCustomer}>
-              <h2>Pelanggan</h2>
-              <label>Nama<input required value={customerForm.name} onChange={(e) => setCustomerForm({ ...customerForm, name: e.target.value })} /></label>
-              <label>Telepon<input value={customerForm.phone} onChange={(e) => setCustomerForm({ ...customerForm, phone: e.target.value })} /></label>
-              <label>Email<input type="email" value={customerForm.email} onChange={(e) => setCustomerForm({ ...customerForm, email: e.target.value })} /></label>
-              <label>Alamat<input value={customerForm.address} onChange={(e) => setCustomerForm({ ...customerForm, address: e.target.value })} /></label>
-              <button type="submit">Simpan Pelanggan</button>
-            </form>
-            <DataTable columns={['Nama', 'Telepon', 'Email']} rows={customers.map((customer) => [customer.name, customer.phone || '-', customer.email || '-'])} />
-          </div>
-
-          <div>
-            <form onSubmit={submitSupplier}>
-              <h2>Supplier</h2>
-              <label>Nama<input required value={supplierForm.name} onChange={(e) => setSupplierForm({ ...supplierForm, name: e.target.value })} /></label>
-              <label>PIC<input value={supplierForm.contact_person} onChange={(e) => setSupplierForm({ ...supplierForm, contact_person: e.target.value })} /></label>
-              <label>Telepon<input value={supplierForm.phone} onChange={(e) => setSupplierForm({ ...supplierForm, phone: e.target.value })} /></label>
-              <label>Email<input type="email" value={supplierForm.email} onChange={(e) => setSupplierForm({ ...supplierForm, email: e.target.value })} /></label>
-              <label>Alamat<input value={supplierForm.address} onChange={(e) => setSupplierForm({ ...supplierForm, address: e.target.value })} /></label>
-              <button type="submit">Simpan Supplier</button>
-            </form>
-            <DataTable columns={['Nama', 'PIC', 'Telepon']} rows={suppliers.map((supplier) => [supplier.name, supplier.contact_person || '-', supplier.phone || '-'])} />
-          </div>
-        </section>
+        <MasterDataSection
+          categories={categories}
+          categoryForm={categoryForm}
+          customerForm={customerForm}
+          customers={customers}
+          setCategoryForm={setCategoryForm}
+          setCustomerForm={setCustomerForm}
+          setSupplierForm={setSupplierForm}
+          submitCategory={submitCategory}
+          submitCustomer={submitCustomer}
+          submitSupplier={submitSupplier}
+          supplierForm={supplierForm}
+          suppliers={suppliers}
+          text={text}
+        />
       )}
 
       {activeTab === 'stok' && (
-        <section className="split">
-          <form onSubmit={submitStock}>
-            <h2>Mutasi Stok</h2>
-            <label>Produk<select required value={stockForm.product_id} onChange={(e) => setStockForm({ ...stockForm, product_id: e.target.value })}>
-              <option value="">Pilih produk</option>
-              {products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}
-            </select></label>
-            <label>Tipe<select value={stockForm.type} onChange={(e) => setStockForm({ ...stockForm, type: e.target.value })}>
-              <option value="in">Stok Masuk</option>
-              <option value="out">Stok Keluar</option>
-              <option value="adjustment">Penyesuaian ke Jumlah Baru</option>
-            </select></label>
-            <label>Jumlah<input required type="number" min="1" value={stockForm.quantity} onChange={(e) => setStockForm({ ...stockForm, quantity: e.target.value })} /></label>
-            <label>Catatan<input value={stockForm.notes} onChange={(e) => setStockForm({ ...stockForm, notes: e.target.value })} /></label>
-            <button type="submit">Simpan Mutasi</button>
-          </form>
-
-          <div>
-            <h2>Riwayat Mutasi</h2>
-            <DataTable
-              columns={['Tanggal', 'Produk', 'Tipe', 'Jumlah', 'Catatan']}
-              rows={movements.map((movement) => [
-                new Date(movement.created_at).toLocaleString('id-ID'),
-                movement.product?.name || '-',
-                movement.type,
-                movement.quantity,
-                movement.notes || '-',
-              ])}
-            />
-          </div>
-        </section>
+        <StockSection
+          formatNumericInput={formatNumericInput}
+          locale={locale}
+          movements={movements}
+          parseFormattedNumber={parseFormattedNumber}
+          products={products}
+          setStockForm={setStockForm}
+          stockForm={stockForm}
+          submitStock={submitStock}
+          text={text}
+        />
       )}
 
       {activeTab === 'transaksi' && (
-        <section>
-          <h2>Transaksi Penjualan</h2>
-          <form onSubmit={submitSale}>
-            <label>Pelanggan<select value={saleForm.customer_id} onChange={(e) => setSaleForm({ ...saleForm, customer_id: e.target.value })}>
-              <option value="">Walk-in</option>
-              {customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}
-            </select></label>
-
-            {saleForm.items.map((item, index) => (
-              <div className="line" key={index}>
-                <select required value={item.product_id} onChange={(e) => updateSaleItem(index, 'product_id', e.target.value)}>
-                  <option value="">Pilih produk</option>
-                  {products.map((product) => <option key={product.id} value={product.id}>{product.name} - {money(product.selling_price)}</option>)}
-                </select>
-                <input required type="number" min="1" value={item.quantity} onChange={(e) => updateSaleItem(index, 'quantity', e.target.value)} />
-                <input type="number" min="0" value={item.discount_amount} onChange={(e) => updateSaleItem(index, 'discount_amount', e.target.value)} />
-              </div>
-            ))}
-
-            <button type="button" onClick={() => setSaleForm({ ...saleForm, items: [...saleForm.items, { product_id: '', quantity: 1, discount_amount: 0 }] })}>Tambah Item</button>
-            <label>Diskon Transaksi<input type="number" value={saleForm.discount_amount} onChange={(e) => setSaleForm({ ...saleForm, discount_amount: e.target.value })} /></label>
-            <label>Pajak<input type="number" value={saleForm.tax_amount} onChange={(e) => setSaleForm({ ...saleForm, tax_amount: e.target.value })} /></label>
-            <label>Metode Bayar<select value={saleForm.payment_method} onChange={(e) => setSaleForm({ ...saleForm, payment_method: e.target.value })}>
-              <option value="cash">Cash</option>
-              <option value="qris">QRIS</option>
-              <option value="card">Card</option>
-              <option value="transfer">Transfer</option>
-            </select></label>
-            <label>Dibayar<input required type="number" value={saleForm.paid_amount} onChange={(e) => setSaleForm({ ...saleForm, paid_amount: e.target.value })} /></label>
-            <p><strong>Total: {money(saleTotal)}</strong></p>
-            <button type="submit">Simpan Transaksi</button>
-          </form>
-        </section>
+        <TransactionSection
+          customers={customers}
+          formatNumericInput={formatNumericInput}
+          formatPriceInput={formatPriceInput}
+          money={money}
+          parseFormattedNumber={parseFormattedNumber}
+          products={products}
+          saleForm={saleForm}
+          saleTotal={saleTotal}
+          sanitizePercentInput={sanitizePercentInput}
+          setSaleForm={setSaleForm}
+          submitSale={submitSale}
+          text={text}
+          updateSaleItem={updateSaleItem}
+        />
       )}
 
       {activeTab === 'riwayat' && (
-        <section>
-          <h2>Riwayat Transaksi</h2>
-          <DataTable
-            columns={['Invoice', 'Tanggal', 'Pelanggan', 'Total', 'Bayar']}
-            rows={sales.map((sale) => [
-              sale.invoice_number,
-              new Date(sale.sale_date).toLocaleString('id-ID'),
-              sale.customer?.name || 'Walk-in',
-              money(sale.total_amount),
-              sale.payment_method,
-            ])}
-          />
-        </section>
+        <HistorySection
+          historySearch={historySearch}
+          itemSummary={itemSummary}
+          loadSales={loadSales}
+          locale={locale}
+          money={money}
+          printReceipt={printReceipt}
+          printing={printing}
+          resetHistorySearch={resetHistorySearch}
+          sales={sales}
+          salesMeta={salesMeta}
+          setHistorySearch={setHistorySearch}
+          submitHistorySearch={submitHistorySearch}
+          text={text}
+        />
       )}
-    </main>
-  );
-}
 
-function DataTable({ columns, rows }) {
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 && <tr><td colSpan={columns.length}>Tidak ada data.</td></tr>}
-          {rows.map((row, index) => (
-            <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+      <ReceiptModal
+        printModalSale={printModalSale}
+        printReceipt={printReceipt}
+        printing={printing}
+        setPrintModalSale={setPrintModalSale}
+        text={text}
+      />
+
+      {loading && <LoadingOverlay text={busyText || text.processing} />}
+    </main>
   );
 }
