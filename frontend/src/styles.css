@@ -1,0 +1,158 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #fff;
+  color: #000;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  color: #000;
+  background: #fff;
+  border: 1px solid #000;
+  border-radius: 0;
+  font: inherit;
+  padding: 8px 10px;
+}
+
+button {
+  cursor: pointer;
+}
+
+.app {
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  border-bottom: 1px solid #000;
+  padding-bottom: 16px;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0;
+}
+
+.tabs button.active {
+  color: #fff;
+  background: #000;
+}
+
+.message {
+  border: 1px solid #000;
+  padding: 10px;
+}
+
+.summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.summary div {
+  border: 1px solid #000;
+  padding: 14px;
+}
+
+.summary strong,
+.summary span {
+  display: block;
+}
+
+.summary strong {
+  font-size: 22px;
+  margin-bottom: 6px;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+.master-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+form {
+  display: grid;
+  gap: 12px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+}
+
+.line {
+  display: grid;
+  grid-template-columns: 1fr 90px 120px;
+  gap: 8px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  border: 1px solid #000;
+  padding: 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+@media (max-width: 760px) {
+  .app {
+    padding: 14px;
+  }
+
+  .header,
+  .split,
+  .master-grid {
+    display: block;
+  }
+
+  .summary {
+    grid-template-columns: 1fr;
+  }
+
+  .line {
+    grid-template-columns: 1fr;
+  }
+
+  form {
+    margin-bottom: 24px;
+  }
+}

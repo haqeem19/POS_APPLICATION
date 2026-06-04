@@ -1,0 +1,25 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Laravel
+backend/vendor/
+backend/bootstrap/cache/*.php
+backend/storage/*.key
+backend/storage/logs/*.log
+backend/storage/framework/cache/data/*
+!backend/storage/framework/cache/data/.gitkeep
+backend/storage/framework/views/*.php
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# System
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
