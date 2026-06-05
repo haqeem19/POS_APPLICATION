@@ -1,5 +1,7 @@
 <?php
 
+use Monolog\Handler\StreamHandler;
+
 return [
     'default' => env('LOG_CHANNEL', 'stack'),
     'channels' => [
@@ -16,6 +18,14 @@ return [
         'errorlog' => [
             'driver' => 'errorlog',
             'level' => env('LOG_LEVEL', 'debug'),
+        ],
+        'stderr' => [
+            'driver' => 'monolog',
+            'level' => env('LOG_LEVEL', 'debug'),
+            'handler' => StreamHandler::class,
+            'with' => [
+                'stream' => 'php://stderr',
+            ],
         ],
     ],
 ];
