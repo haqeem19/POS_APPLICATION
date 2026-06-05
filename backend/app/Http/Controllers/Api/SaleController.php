@@ -13,9 +13,28 @@ class SaleController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
+        $search = trim((string) $request->query('search', ''));
+        $perPage = min(max((int) $request->query('per_page', 15), 1), 100);
+
         $sales = Sale::with(['customer', 'items.product'])
+            ->when($search !== '', function ($query) use ($search) {
+                $query->where(function ($innerQuery) use ($search) {
+                    $innerQuery
+                        ->where('invoice_number', 'ilike', "%{$search}%")
+                        ->orWhere('payment_method', 'ilike', "%{$search}%")
+                        ->orWhere('status', 'ilike', "%{$search}%")
+                        ->orWhereHas('customer', function ($customerQuery) use ($search) {
+                            $customerQuery->where('name', 'ilike', "%{$search}%");
+                        })
+                        ->orWhereHas('items.product', function ($productQuery) use ($search) {
+                            $productQuery
+                                ->where('name', 'ilike', "%{$search}%")
+                                ->orWhere('sku', 'ilike', "%{$search}%");
+                        });
+                });
+            })
             ->latest()
-            ->paginate((int) $request->query('per_page', 15));
+            ->paginate($perPage);
 
         return response()->json($sales);
     }
