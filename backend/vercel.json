@@ -1,10 +1,14 @@
 {
   "functions": {
-    "api/index.php": {
+    "api/*.php": {
       "runtime": "vercel-php@0.8.0"
     }
   },
   "routes": [
+    {
+      "src": "/_debug/php",
+      "dest": "/api/ping.php"
+    },
     {
       "src": "/(.*)",
       "dest": "/api/index.php"
